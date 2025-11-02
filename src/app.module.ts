@@ -7,6 +7,7 @@ import { ProductsModule } from './products/products.module';
 import { RedisModule } from './redis/redis.module';
 import { ConfigModule } from '@nestjs/config';
 import { IndexModule } from './index/index.module';
+import { SearchModule } from './search/search.module';
 import appConfig from './app.config';
 
 dotenv.config();
@@ -28,6 +29,7 @@ dotenv.config();
     ProductsModule,
     RedisModule,
     IndexModule,
+    SearchModule,
   ],
   controllers: [AppController],
   providers: [AppService],

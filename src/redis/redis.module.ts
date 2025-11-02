@@ -8,6 +8,6 @@ import { redisClientFactory } from 'src/core/database/redis-configuration.module
   controllers: [],
   providers: [RedisService, RedisRepository, redisClientFactory],
   imports: [],
-  exports: [RedisService],
+  exports: [RedisService, 'RedisClient'],
 })
 export class RedisModule {}
