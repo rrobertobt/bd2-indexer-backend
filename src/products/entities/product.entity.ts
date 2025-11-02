@@ -18,10 +18,22 @@ export class Product {
   product_type: string;
 
   @Prop()
+  currency: string;
+
+  @Prop()
+  stock: number;
+
+  @Prop()
+  rating: number;
+
+  @Prop()
   sku: string;
 
   @Prop()
   price: number;
+
+  @Prop()
+  created_at: Date;
 
   @Prop({ required: false })
   description: string;

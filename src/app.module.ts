@@ -6,6 +6,7 @@ import { MongooseModule } from '@nestjs/mongoose';
 import { ProductsModule } from './products/products.module';
 import { RedisModule } from './redis/redis.module';
 import { ConfigModule } from '@nestjs/config';
+import { IndexModule } from './index/index.module';
 import appConfig from './app.config';
 
 dotenv.config();
@@ -26,6 +27,7 @@ dotenv.config();
     ),
     ProductsModule,
     RedisModule,
+    IndexModule,
   ],
   controllers: [AppController],
   providers: [AppService],
