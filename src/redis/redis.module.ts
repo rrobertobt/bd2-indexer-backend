@@ -5,7 +5,7 @@ import { RedisRepository } from './redis.repository';
 import { redisClientFactory } from 'src/core/database/redis-configuration.module';
 
 @Module({
-  controllers: [RedisController],
+  controllers: [],
   providers: [RedisService, RedisRepository, redisClientFactory],
   imports: [],
   exports: [RedisService],
