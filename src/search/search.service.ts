@@ -2,7 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import Redis from 'ioredis';
 import { Model } from 'mongoose';
-import { Product } from 'src/products/entities/product.entity';
+import { Product, ProductDocument } from 'src/products/entities/product.entity';
 
 export interface SearchResponse {
   items: Product[];
@@ -17,6 +17,7 @@ export interface SearchResponse {
 @Injectable()
 export class SearchService {
   private readonly TTL_SECONDS = 60;
+  private readonly SUGGEST_TTL_SECONDS = 30;
 
   constructor(
     @InjectModel(Product.name) private productModel: Model<Product>,
@@ -48,6 +49,8 @@ export class SearchService {
 
     const cacheKey = `search:q=${query}:page=${clampedPage}:limit=${clampedLimit}`;
 
+    const t0cache = Date.now();
+
     // 1) Intento de cache
     try {
       const cached = await this.redisClient.get(cacheKey);
@@ -60,6 +63,7 @@ export class SearchService {
         const parsed = JSON.parse(cached) as SearchResponse;
         console.log('Returning cached search result');
         parsed.cached = true;
+        parsed.tookMs = Date.now() - t0cache;
         return parsed;
       }
     } catch (e) {
@@ -71,10 +75,14 @@ export class SearchService {
       title: 1,
       brand: 1,
       category: 1,
-      sku: 1,
       product_type: 1,
-      price: 1,
       description: 1,
+      price: 1,
+      currency: 1,
+      stock: 1,
+      sku: 1,
+      rating: 1,
+      created_at: 1,
     };
 
     // 2) Consulta en Mongo con índice de texto ponderado
@@ -90,7 +98,7 @@ export class SearchService {
 
     const sortByScore = { score: { $meta: 'textScore' } };
 
-    let items: any[] = [];
+    let items: Product[] = [];
 
     if (totalItems) {
       items = await this.productModel
@@ -130,9 +138,10 @@ export class SearchService {
     // (Opcional) Boost para SKU exacto: si coincide, lo anteponemos
     if (query.length <= 64) {
       const exact = await this.productModel.findOne({ sku: query }).lean();
+      console.log('Exact SKU boost check:', exact ? 'FOUND' : 'NOT FOUND');
       if (exact) {
         const exists = items.find(
-          (d: any) => String(d._id) === String(exact._id),
+          (d: ProductDocument) => String(d._id) === String(exact._id),
         );
         if (!exists) items = [exact, ...items];
       }
@@ -173,24 +182,142 @@ export class SearchService {
    *  ZINCRBY sugg:{prefix} 1 {term}
    */
   async suggest(q: string) {
-    const input = (q ?? '').trim().toLowerCase();
-    if (!input) return { suggestions: [] };
+    const query = (q ?? '').trim();
+    if (!query) return { suggestions: [] };
 
-    const parts = input.split(/\s+/);
-    const prefix = parts[parts.length - 1] || '';
-    if (prefix.length < 3) return { suggestions: [] };
+    const normalized = query.toLowerCase();
+    const cacheKey = `suggest:q=${normalized}`;
 
     try {
-      // Top 10 términos con mayor score para ese prefijo
-      const suggestions = await this.redisClient.zrevrange(
-        `sugg:${prefix}`,
-        0,
-        9,
-      );
-      return { suggestions };
-    } catch (e) {
-      // Si Redis falla, devolvemos vacío sin romper
-      return { suggestions: [] };
+      const cached = await this.redisClient.get(cacheKey);
+      if (cached) {
+        const suggestions = JSON.parse(cached);
+        if (Array.isArray(suggestions)) {
+          return { suggestions };
+        }
+      }
+    } catch (err) {
+      console.warn('Redis suggest cache GET failed:', err);
     }
+
+    const suggestionsSet = new Map<string, number>();
+    const append = (value: string, score: number) => {
+      const existing = suggestionsSet.get(value);
+      if (existing === undefined || score > existing) {
+        suggestionsSet.set(value, score);
+      }
+    };
+
+    const parts = normalized.split(/\s+/);
+    const prefix = parts[parts.length - 1] || '';
+
+    if (prefix.length >= 2) {
+      try {
+        const redisSuggestions = await this.redisClient.zrevrange(
+          `sugg:${prefix}`,
+          0,
+          9,
+        );
+        for (const suggestion of redisSuggestions) {
+          if (typeof suggestion === 'string' && suggestion.trim().length) {
+            append(suggestion, 100);
+          }
+        }
+      } catch (err) {
+        console.warn('Redis suggest ZSET failed:', err);
+      }
+    }
+
+    if (!suggestionsSet.size) {
+      const mongoSuggestions = await this.querySuggestionsFromMongo(query, 10);
+      for (let i = 0; i < mongoSuggestions.length; i++) {
+        append(mongoSuggestions[i], 80 - i);
+      }
+    }
+
+    const suggestions = Array.from(suggestionsSet.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, 10)
+      .map(([value]) => value);
+
+    try {
+      await this.redisClient.set(
+        cacheKey,
+        JSON.stringify(suggestions),
+        'EX',
+        this.SUGGEST_TTL_SECONDS,
+      );
+    } catch (err) {
+      console.warn('Redis suggest cache SET failed:', err);
+    }
+
+    return { suggestions };
+  }
+
+  private async querySuggestionsFromMongo(query: string, limit = 10) {
+    const escapeRegex = (value: string) =>
+      value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    const pieces = query.split(/\s+/).filter(Boolean);
+    const flexiblePattern = pieces.map(escapeRegex).join('.*');
+    const flexibleRegex = new RegExp(
+      flexiblePattern || escapeRegex(query),
+      'i',
+    );
+    const prefixRegex = new RegExp(`^${escapeRegex(query)}`, 'i');
+
+    const candidates = await this.productModel
+      .find(
+        {
+          $or: [
+            { title: flexibleRegex },
+            { brand: flexibleRegex },
+            { category: flexibleRegex },
+            { product_type: flexibleRegex },
+            { sku: flexibleRegex },
+          ],
+        },
+        {
+          title: 1,
+          brand: 1,
+          category: 1,
+          product_type: 1,
+          sku: 1,
+        },
+      )
+      .limit(50)
+      .lean()
+      .exec();
+
+    const scored = new Map<string, number>();
+    const track = (value: unknown, baseScore: number) => {
+      if (typeof value !== 'string') return;
+      const trimmed = value.trim();
+      if (!trimmed.length) return;
+
+      const lower = trimmed.toLowerCase();
+      let score = baseScore;
+      if (prefixRegex.test(trimmed)) score += 5;
+      if (lower === query.toLowerCase()) score += 10;
+      if (flexibleRegex.test(trimmed)) score += 2;
+
+      const current = scored.get(trimmed);
+      if (current === undefined || score > current) {
+        scored.set(trimmed, score);
+      }
+    };
+
+    for (const candidate of candidates) {
+      track(candidate.title, 50);
+      track(candidate.brand, 40);
+      track(candidate.category, 30);
+      track(candidate.product_type, 20);
+      track(candidate.sku, 35);
+    }
+
+    return Array.from(scored.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .slice(0, limit)
+      .map(([value]) => value);
   }
 }

@@ -1,21 +1,21 @@
 import { Controller, Get, Query } from '@nestjs/common';
 import { SearchService } from './search.service';
 
-@Controller('search')
+@Controller()
 export class SearchController {
   constructor(private readonly searchService: SearchService) {}
 
-  @Get()
+  @Get('search')
   search(
     @Query('q') q: string,
     @Query('page') page = '1',
-    @Query('limit') limit = '10',
+    @Query('limit') limit = '20',
   ) {
     return this.searchService.findAll(q ?? '', Number(page), Number(limit));
   }
 
   @Get('suggest')
   suggest(@Query('q') q: string) {
-    return this.searchService.suggest((q ?? '').toLowerCase());
+    return this.searchService.suggest(q ?? '');
   }
 }

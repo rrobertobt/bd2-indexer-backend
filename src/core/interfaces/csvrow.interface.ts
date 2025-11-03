@@ -10,5 +10,5 @@ export interface CSVRow {
   stock: string;
   sku: string;
   rating: string;
-  created_at: Date;
+  created_at: string;
 }

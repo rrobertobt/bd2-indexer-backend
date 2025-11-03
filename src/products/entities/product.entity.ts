@@ -9,13 +9,19 @@ export class Product {
   title: string;
 
   @Prop()
-  category: string;
-
-  @Prop()
   brand: string;
 
   @Prop()
+  category: string;
+
+  @Prop()
   product_type: string;
+
+  @Prop()
+  description: string;
+
+  @Prop()
+  price: number;
 
   @Prop()
   currency: string;
@@ -24,19 +30,13 @@ export class Product {
   stock: number;
 
   @Prop()
-  rating: number;
-
-  @Prop()
   sku: string;
 
   @Prop()
-  price: number;
+  rating: number;
 
   @Prop()
   created_at: Date;
-
-  @Prop({ required: false })
-  description: string;
 }
 
 export const ProductSchema = SchemaFactory.createForClass(Product);
