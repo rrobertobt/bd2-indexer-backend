@@ -58,6 +58,6 @@ ProductSchema.index(
       product_type: 2,
     },
     name: 'text_search_weighted',
-    default_language: 'spanish', // o "none"
+    default_language: 'none', // o "none"
   },
 );

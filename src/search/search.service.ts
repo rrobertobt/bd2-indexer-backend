@@ -4,6 +4,16 @@ import Redis from 'ioredis';
 import { Model } from 'mongoose';
 import { Product } from 'src/products/entities/product.entity';
 
+export interface SearchResponse {
+  items: Product[];
+  page: number;
+  limit: number;
+  totalItems: number;
+  totalPages: number;
+  tookMs: number;
+  cached: boolean;
+}
+
 @Injectable()
 export class SearchService {
   private readonly TTL_SECONDS = 60;
@@ -29,6 +39,8 @@ export class SearchService {
         items: [],
         page: clampedPage,
         limit: clampedLimit,
+        totalItems: 0,
+        totalPages: 0,
         tookMs: 0,
         cached: false,
       };
@@ -39,8 +51,15 @@ export class SearchService {
     // 1) Intento de cache
     try {
       const cached = await this.redisClient.get(cacheKey);
+      console.log(
+        'Cached search result for key:',
+        cacheKey,
+        cached ? 'HIT' : 'MISS',
+      );
       if (cached) {
-        const parsed = JSON.parse(cached);
+        const parsed = JSON.parse(cached) as SearchResponse;
+        console.log('Returning cached search result');
+        parsed.cached = true;
         return parsed;
       }
     } catch (e) {
@@ -48,13 +67,7 @@ export class SearchService {
       console.warn('Redis GET failed:', e);
     }
 
-    // 2) Consulta en Mongo con índice de texto ponderado
-    const t0 = Date.now();
-    const filter = { $text: { $search: query } };
-
-    // Proyección con textScore; cast a any para evitar conflictos de tipos
-    const projection = {
-      score: { $meta: 'textScore' },
+    const baseProjection = {
       title: 1,
       brand: 1,
       category: 1,
@@ -64,16 +77,55 @@ export class SearchService {
       description: 1,
     };
 
+    // 2) Consulta en Mongo con índice de texto ponderado
+    const t0 = Date.now();
+    const filter = { $text: { $search: query } };
+    let totalItems = await this.productModel.countDocuments(filter);
+
+    // Proyección con textScore; cast a any para evitar conflictos de tipos
+    const projection = {
+      score: { $meta: 'textScore' },
+      ...baseProjection,
+    };
+
     const sortByScore = { score: { $meta: 'textScore' } };
 
-    let items = await this.productModel
-      .find(filter, projection)
-      .sort(sortByScore)
-      .skip(skip)
-      .limit(clampedLimit)
-      .lean()
-      .exec();
-    console.log('Items found:', items.length);
+    let items: any[] = [];
+
+    if (totalItems) {
+      items = await this.productModel
+        .find(filter, projection)
+        .sort(sortByScore)
+        .skip(skip)
+        .limit(clampedLimit)
+        .lean()
+        .exec();
+    } else {
+      const escapeRegex = (value: string) =>
+        value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pieces = query.split(/\s+/).filter(Boolean);
+      const pattern = pieces.map(escapeRegex).join('.*');
+      const fallbackRegex = new RegExp(pattern || escapeRegex(query), 'i');
+      const fallbackFilter = {
+        $or: [
+          { title: fallbackRegex },
+          { brand: fallbackRegex },
+          { category: fallbackRegex },
+          { sku: fallbackRegex },
+          { product_type: fallbackRegex },
+        ],
+      };
+
+      totalItems = await this.productModel.countDocuments(fallbackFilter);
+
+      items = await this.productModel
+        .find(fallbackFilter, baseProjection)
+        .sort({ title: 1 })
+        .skip(skip)
+        .limit(clampedLimit)
+        .lean()
+        .exec();
+    }
 
     // (Opcional) Boost para SKU exacto: si coincide, lo anteponemos
     if (query.length <= 64) {
@@ -87,11 +139,15 @@ export class SearchService {
     }
 
     const tookMs = Date.now() - t0;
+    const totalPages =
+      totalItems > 0 ? Math.ceil(totalItems / clampedLimit) : 0;
 
     const response = {
       items,
       page: clampedPage,
       limit: clampedLimit,
+      totalItems,
+      totalPages,
       tookMs,
       cached: false,
     };
@@ -105,7 +161,7 @@ export class SearchService {
         this.TTL_SECONDS,
       );
     } catch (e) {
-      // console.warn('Redis SET failed:', e);
+      console.warn('Redis SET failed:', e);
     }
 
     return response;

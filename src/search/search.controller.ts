@@ -9,7 +9,7 @@ export class SearchController {
   search(
     @Query('q') q: string,
     @Query('page') page = '1',
-    @Query('limit') limit = '20',
+    @Query('limit') limit = '10',
   ) {
     return this.searchService.findAll(q ?? '', Number(page), Number(limit));
   }
