@@ -41,6 +41,9 @@ export class Product {
 
 export const ProductSchema = SchemaFactory.createForClass(Product);
 
+// Index to accelerate exact SKU lookups and upserts
+ProductSchema.index({ sku: 1 });
+
 ProductSchema.index(
   {
     title: 'text',

@@ -12,6 +12,7 @@ export interface SearchResponse {
   totalPages: number;
   tookMs: number;
   cached: boolean;
+  hasMore?: boolean;
 }
 
 @Injectable()
@@ -88,7 +89,8 @@ export class SearchService {
     // 2) Consulta en Mongo con índice de texto ponderado
     const t0 = Date.now();
     const filter = { $text: { $search: query } };
-    let totalItems = await this.productModel.countDocuments(filter);
+    // Avoid expensive countDocuments on large corpora; we will derive hasMore with limit+1
+    const totalItems = -1; // unknown (skipping exact counts for performance)
 
     // Proyección con textScore; cast a any para evitar conflictos de tipos
     const projection = {
@@ -100,17 +102,21 @@ export class SearchService {
 
     let items: Product[] = [];
 
-    if (totalItems) {
-      items = await this.productModel
-        .find(filter, projection)
-        .sort(sortByScore)
-        .skip(skip)
-        .limit(clampedLimit)
-        .lean()
-        .exec();
-    } else {
+    const fetchLimit = clampedLimit + 1; // fetch one extra to detect if there is another page
+
+    // Primary query with text index and weighted relevance
+    items = await this.productModel
+      .find(filter, projection)
+      .sort(sortByScore)
+      .skip(skip)
+      .limit(fetchLimit)
+      .lean()
+      .exec();
+
+    // If no results with $text (e.g., query token not present in index), try a bounded, lighter fallback
+    if (!items || items.length === 0) {
       const escapeRegex = (value: string) =>
-        value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        value.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&');
       const pieces = query.split(/\s+/).filter(Boolean);
       const pattern = pieces.map(escapeRegex).join('.*');
       const fallbackRegex = new RegExp(pattern || escapeRegex(query), 'i');
@@ -124,15 +130,18 @@ export class SearchService {
         ],
       };
 
-      totalItems = await this.productModel.countDocuments(fallbackFilter);
-
       items = await this.productModel
         .find(fallbackFilter, baseProjection)
         .sort({ title: 1 })
         .skip(skip)
-        .limit(clampedLimit)
+        .limit(fetchLimit)
         .lean()
         .exec();
+    }
+
+    const hasMore = items.length > clampedLimit;
+    if (hasMore) {
+      items = items.slice(0, clampedLimit);
     }
 
     // (Opcional) Boost para SKU exacto: si coincide, lo anteponemos
@@ -149,14 +158,15 @@ export class SearchService {
 
     const tookMs = Date.now() - t0;
     const totalPages =
-      totalItems > 0 ? Math.ceil(totalItems / clampedLimit) : 0;
+      totalItems && totalItems > 0 ? Math.ceil(totalItems / clampedLimit) : -1;
 
     const response = {
       items,
       page: clampedPage,
       limit: clampedLimit,
-      totalItems,
-      totalPages,
+      totalItems, // -1 indicates "not computed" to save time
+      totalPages, // -1 indicates "not computed"
+      hasMore,
       tookMs,
       cached: false,
     };
